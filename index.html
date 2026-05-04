@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Energy Office Runner</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #2a2a2a; touch-action: none; font-family: monospace; user-select: none; }
+canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+
+#uiLayer {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 10;
+}
+
+.btn {
+    pointer-events: auto;
+    background: #333;
+    color: #fff;
+    border: 2px solid #fff;
+    padding: 10px 20px;
+    font-family: monospace;
+    font-weight: bold;
+    font-size: 16px;
+    cursor: pointer;
+    border-radius: 4px;
+    margin: 5px;
+    text-transform: uppercase;
+    transition: background 0.2s;
+}
+.btn:hover { background: #555; }
+
+#pauseBtn {
+    position: absolute;
+    top: 15px; left: 15px;
+    pointer-events: auto;
+    background: rgba(0,0,0,0.8);
+    color: #fff;
+    border: 2px solid #fff;
+    width: 44px; height: 44px;
+    padding: 0;
+    font-size: 20px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+}
+#pauseBtn:hover { background: rgba(0,0,0,1); }
+
+.screen {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0,0,0,0.9);
+    pointer-events: auto;
+    z-index: 20;
+    text-align: center;
+    padding: 20px;
+}
+
+h1 { font-size: 48px; margin-bottom: 20px; color: #fff; letter-spacing: 2px; text-shadow: 3px 3px 0 #000; }
+p { font-size: 18px; margin-bottom: 20px; color: #ccc; }
+.score-text { font-size: 32px; font-weight: bold; color: #fff; margin: 10px 0; }
+.share-hint { font-size: 14px; color: #888; margin-top: 15px; }
+
+/* Выровненный блок статистики */
+#endStats {
+    font-family: 'Courier New', monospace;
+    font-size: 20px;
+    color: #ccc;
+    margin: 10px 0 20px;
+    line-height: 1.8;
+    text-align: left;
+    display: inline-block;
+    white-space: pre;
+    background: rgba(255,255,255,0.05);
+    padding: 15px 25px;
+    border-radius: 8px;
+}
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div id="uiLayer">
+    <button id="pauseBtn">❚❚</button>
+</div>
+
+<div id="startScreen" class="screen" style="display: flex;">
+    <h1>ENERGY OFFICE RUNNER</h1>
+    <p>Тап / Пробел = Прыжок</p>
+    <p>Двойной тап = Двойной прыжок</p>
+    <button class="btn" id="startBtn">ИГРАТЬ</button>
+</div>
+
+<div id="pauseScreen" class="screen">
+    <h1>ПАУЗА</h1>
+    <button class="btn" id="resumeBtn">ПРОДОЛЖИТЬ</button>
+</div>
+
+<div id="gameOverScreen" class="screen">
+    <h1 style="color: #ff4444;">ENERGY OVER</h1>
+    <div class="score-text">SCORE: <span id="finalScore">0</span></div>
+    
+    <div id="endStats">hi-score:   0
+БАДов:     0/0
+Boost's:   0/0</div>
+
+    <div style="display: flex; gap: 15px; flex-wrap: wrap; justify-content: center;">
+        <button class="btn" id="restartBtn">ЗАНОВО</button>
+    </div>
+    <p class="share-hint">📸 Сделай скрин и поделись в соц сетях!</p>
+</div>
+
+<script>
+(function() {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  let W = window.innerWidth;
+  let H = window.innerHeight;
+  
+  let state = 'start';
+  let score = 0, gameTime = 0;
+  let energy = 100;
+  let shakeT = 0, shakeI = 0;
+  let groundOff = 0;
+  let noMissTime = 0;
+  let baseGameSpeed = 6;
+  let currentSpeed = 6;
+  let boostTimer = 0;
+  let slowMotionTimer = 0;
+
+  let stats = {
+    capsulesCollected: 0,
+    capsulesMissed: 0,
+    boostsCollected: 0,
+    boostsMissed: 0
+  };
+
+  let lastTapTime = 0;
+  const DOUBLE_TAP_WINDOW = 300;
+  let jumpCount = 0;
+  const MAX_JUMPS = 2;
+
+  let p = { y:0, vy:0, jump:false, grounded:true, frame:0, timer:0, fallen:false };
+
+  let capsules = [], capTimer = 0;
+  let jars = [], jarTimer = 0;
+  let obstacles = [], obsTimer = 0;
+  let dust = [];
+  let bgs = { far: [], mid: [], near: [] };
+
+  const FEET_ROW = 15;
+  const GRAV = 0.6;
+  const JUMP_V = -13.5;
+
+  let hiScore = 0;
+  try { hiScore = parseInt(localStorage.getItem('officeRunnerHi')) || 0; } catch(e) { hiScore = 0; }
+
+  function setFavicon() {
+      var c = document.createElement('canvas');
+      c.width = 64; c.height = 64;
+      var cx = c.getContext('2d');
+      cx.fillStyle = '#333';
+      cx.fillRect(0, 0, 64, 64);
+      cx.fillStyle = '#fff';
+      cx.font = 'bold 40px monospace';
+      cx.textAlign = 'center';
+      cx.textBaseline = 'middle';
+      cx.fillText('EG', 32, 32);
+      var link = document.createElement('link');
+      link.rel = 'icon';
+      link.href = c.toDataURL();
+      document.head.appendChild(link);
+  }
+  setFavicon();
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W;
+    canvas.height = H;
+    if(state === 'playing') {
+      var l = layout();
+      if(p.grounded) p.y = l.gY - FEET_ROW*l.sc;
+    }
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const startScreen = document.getElementById('startScreen');
+  const gameOverScreen = document.getElementById('gameOverScreen');
+  const pauseScreen = document.getElementById('pauseScreen');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resumeBtn = document.getElementById('resumeBtn');
+  const startBtn = document.getElementById('startBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const finalScoreEl = document.getElementById('finalScore');
+  const endStatsEl = document.getElementById('endStats');
+
+  function createBuilding(x, layerMod, minH, maxH) {
+    return {
+      x: x,
+      h: minH + Math.random() * maxH,
+      w: 40 + Math.random() * 60,
+      mod: layerMod,
+      color: layerMod < 0.8 ? '#1a1a1a' : (Math.random() > 0.5 ? '#2a2a2a' : '#333')
+    };
+  }
+
+  function createBillboard(x) {
+    var texts = ['UESUPPS', 'ULTRASUPPS', 'CAPITAL HEALTH'];
+    var bh = 50 + Math.random() * 40;
+    return {
+      x: x,
+      h: bh,
+      w: 120 + Math.random() * 60,
+      mod: 0.6,
+      text: texts[Math.floor(Math.random()*3)],
+      poleHeight: 30 + Math.random() * 40
+    };
+  }
+
+  function initBuildings() {
+    bgs.far = []; bgs.mid = []; bgs.near = [];
+    for(var i=0; i<15; i++) bgs.far.push(createBuilding(i*100, 0.3, 80, 120));
+    for(var i=0; i<8; i++) bgs.mid.push(createBillboard(i*280 + 50));
+    for(var i=0; i<10; i++) bgs.near.push(createBuilding(i*150 - 100, 1.0, 60, 100));
+  }
+
+  // === LAYOUT ===
+  function layout() {
+    var port = H > W;
+    // Мобильная: земля на 1/3 экрана (0.65), чтобы тапать было удобно
+    // Десктоп: земля ниже (0.75)
+    var gY = port ? H * 0.65 : H * 0.75;
+    var sc = port ? Math.max(2.5, Math.min(4, W/95)) : Math.max(2, Math.min(3.5, H/300));
+    return { gY: gY, sc: sc, px: W*(port?0.15:0.15) };
+  }
+
+  function getSprite(fr, jump) {
+    var s = {};
+    var B='#000', W='#fff', G='#888', SKIN='#f5d0b0', TIE='#c00', SUIT='#1a1a1a';
+    var la = jump ? 0 : Math.sin(fr*0.5)*2;
+    var as = jump ? 0 : Math.cos(fr*0.5);
+    function sp(x,y,c){ s[x+','+y]=c; }
+    
+    sp(6,0,B);sp(7,0,B);sp(8,0,B);sp(9,0,B);
+    sp(5,1,B);sp(6,1,B);sp(7,1,B);sp(8,1,B);sp(9,1,B);sp(10,1,B);
+    sp(5,2,B);sp(6,2,SKIN);sp(7,2,SKIN);sp(8,2,SKIN);sp(9,2,SKIN);sp(10,2,B);
+    sp(5,3,B);sp(6,3,SKIN);sp(7,3,B);sp(8,3,SKIN);sp(9,3,B);sp(10,3,B);
+    sp(5,4,B);sp(6,4,SKIN);sp(7,4,SKIN);sp(8,4,SKIN);sp(9,4,SKIN);sp(10,4,B);
+    sp(5,5,B);sp(6,5,SKIN);sp(7,5,SKIN);sp(8,5,SKIN);sp(9,5,SKIN);sp(10,5,B);
+    sp(6,6,B);sp(7,6,SKIN);sp(8,6,SKIN);sp(9,6,B);
+    
+    sp(7,7,SKIN);sp(8,7,SKIN);sp(9,7,SKIN);
+    sp(5,8,SUIT);sp(6,8,SUIT);sp(7,8,W);sp(8,8,TIE);sp(9,8,W);sp(10,8,SUIT);sp(11,8,SUIT);
+    
+    sp(5,9,SUIT);sp(6,9,SUIT);sp(7,9,W);sp(8,9,TIE);sp(9,9,W);sp(10,9,SUIT);sp(11,9,SUIT);
+    sp(5,10,SUIT);sp(6,10,SUIT);sp(7,10,SUIT);sp(8,10,SUIT);sp(9,10,SUIT);sp(10,10,SUIT);sp(11,10,SUIT);
+    sp(5,11,SUIT);sp(6,11,SUIT);sp(7,11,SUIT);sp(8,11,SUIT);sp(9,11,SUIT);sp(10,11,SUIT);sp(11,11,SUIT);
+    
+    var lo = Math.round(-as*1.5);
+    sp(2+lo,9,B);sp(3+lo,9,B);sp(4+lo,9,B);
+    sp(2+lo,10,B);sp(3+lo,10,G);sp(4+lo,10,B);
+    sp(2+lo,11,B);sp(3+lo,11,B);sp(4+lo,11,B);
+    
+    sp(12+Math.round(as*1.5),9,SUIT);sp(12+Math.round(as*1.5),10,SUIT);
+    sp(13+Math.round(as*1.5),10,SKIN);
+    
+    var ll=Math.round(la), rl=Math.round(-la);
+    sp(6+ll,12,SUIT);sp(7+ll,12,SUIT);sp(8+ll,12,SUIT);
+    sp(6+ll,13,SUIT);sp(7+ll,13,SUIT);sp(8+ll,13,SUIT);
+    sp(9+rl,12,SUIT);sp(10+rl,12,SUIT);sp(11+rl,12,SUIT);
+    sp(9+rl,13,SUIT);sp(10+rl,13,SUIT);sp(11+rl,13,SUIT);
+    
+    return s;
+  }
+
+  function drawPixel(px, py, sp, sc) {
+    for(var k in sp) {
+      var parts = k.split(',');
+      var x = parseInt(parts[0]);
+      var y = parseInt(parts[1]);
+      ctx.fillStyle = sp[k];
+      ctx.fillRect(Math.round(px+x*sc), Math.round(py+y*sc), Math.max(1,Math.ceil(sc)), Math.max(1,Math.ceil(sc)));
+    }
+  }
+
+  function drawObstacle(obs) {
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+    ctx.fillRect(obs.x, obs.y, obs.w, obs.h); ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+    ctx.beginPath();
+    ctx.moveTo(obs.x + 5, obs.y + 10); ctx.lineTo(obs.x + obs.w - 5, obs.y + 10);
+    ctx.moveTo(obs.x + 5, obs.y + 20); ctx.lineTo(obs.x + obs.w - 5, obs.y + 20);
+    ctx.stroke();
+  }
+
+  function drawJar(x, y, w, h) {
+    ctx.save();
+    var gradient = ctx.createRadialGradient(x + w/2, y + h/2, 0, x + w/2, y + h/2, w);
+    gradient.addColorStop(0, 'rgba(100, 200, 255, 0.8)');
+    gradient.addColorStop(0.5, 'rgba(50, 150, 255, 0.4)');
+    gradient.addColorStop(1, 'rgba(0, 100, 255, 0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(x - w/2, y - h/2, w*2, h*2);
+    
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x + w*0.2, y); ctx.lineTo(x + w*0.8, y);
+    ctx.lineTo(x + w*0.9, y + h); ctx.lineTo(x + w*0.1, y + h);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    
+    ctx.fillStyle = 'rgba(100, 200, 255, 0.6)';
+    ctx.beginPath();
+    ctx.moveTo(x + w*0.15, y + h*0.6);
+    ctx.lineTo(x + w*0.85, y + h*0.6);
+    ctx.lineTo(x + w*0.85, y + h*0.9);
+    ctx.lineTo(x + w*0.15, y + h*0.9);
+    ctx.closePath();
+    ctx.fill();
+    
+    ctx.fillStyle = '#000'; ctx.textAlign = 'center';
+    ctx.font = 'bold ' + Math.max(8, h*0.35) + 'px monospace';
+    ctx.fillText('+100', x + w/2, y + h*0.65);
+    ctx.restore();
+  }
+
+  function drawCapsule(x, y, w, h, type) {
+    ctx.save(); ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.fillStyle = '#fff';
+    if(type === 0) {
+      ctx.beginPath(); ctx.arc(x + w/2, y + h/2, w/2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x + w*0.25, y + h*0.25); ctx.lineTo(x + w*0.75, y + h*0.75); ctx.stroke();
+    } else {
+      var r = Math.min(h/2, w/2);
+      ctx.beginPath();
+      ctx.moveTo(x+r, y); ctx.lineTo(x+w-r, y);
+      ctx.arcTo(x+w, y, x+w, y+r, r);
+      ctx.lineTo(x+w, y+h-r);
+      ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+      ctx.lineTo(x+r, y+h);
+      ctx.arcTo(x, y+h, x, y+h-r, r);
+      ctx.lineTo(x, y+r);
+      ctx.arcTo(x, y, x+r, y, r);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x + w*0.45, y); ctx.lineTo(x + w*0.45, y + h); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawBillboard(b, l) {
+      var bw = b.w;
+      var bh = b.h;
+      var bx = b.x;
+      var boardY = l.gY - bh - b.poleHeight;
+      
+      ctx.fillStyle = '#666';
+      ctx.fillRect(bx + bw/2 - 2, boardY + bh, 4, b.poleHeight);
+      
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.fillRect(bx, boardY, bw, bh);
+      ctx.strokeRect(bx, boardY, bw, bh);
+      
+      ctx.fillStyle = '#000';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      var fontSize = Math.min(bw / (b.text.length * 1.3), bh * 0.45);
+      ctx.font = 'bold ' + Math.max(10, fontSize) + 'px monospace';
+      ctx.fillText(b.text, bx + bw/2, boardY + bh/2);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+  }
+
+  function drawStart() {
+    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + Math.floor(H*0.05) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ENERGY OFFICE RUNNER', W/2, H*0.38);
+    ctx.font = Math.floor(H*0.022) + 'px monospace';
+    ctx.fillText('Тап / Пробел = Прыжок', W/2, H*0.46);
+    ctx.fillText('Двойной тап = Двойной прыжок!', W/2, H*0.52);
+    ctx.font = Math.floor(H*0.02) + 'px monospace';
+    ctx.fillStyle = '#888';
+    ctx.fillText('HI-SCORE: ' + hiScore, W/2, H*0.62);
+    ctx.textAlign = 'left';
+  }
+
+  function spawnCapsule() {
+    var l = layout();
+    var jh = (JUMP_V*JUMP_V)/(2*GRAV);
+    var th = jh*0.5 + Math.random()*jh*0.4;
+    var size = Math.max(18, l.sc*7);
+    capsules.push({ x: W+30, y: l.gY - FEET_ROW*l.sc - th - size*0.5, w: size, h: size*0.5, collected: false, bob: Math.random()*Math.PI*2, type: Math.floor(Math.random()*2) });
+  }
+
+  function spawnObstacle() {
+    var l = layout();
+    var size = Math.max(20, l.sc*6);
+    obstacles.push({ x: W+30, y: l.gY - size, w: size, h: size });
+  }
+
+  function spawnJar() {
+    var l = layout();
+    var size = Math.max(22, l.sc*8);
+    jars.push({ x: W+30, y: l.gY - FEET_ROW*l.sc - 100, w: size, h: size, collected: false, bob: Math.random()*Math.PI*2 });
+  }
+
+  function doJump() {
+    if(state !== 'playing' || p.fallen) return;
+
+    var now = Date.now();
+    var timeSinceLastTap = now - lastTapTime;
+
+    if(p.grounded) {
+      p.vy = JUMP_V;
+      p.jump = true;
+      p.grounded = false;
+      jumpCount = 1;
+      lastTapTime = now;
+      spawnJumpDust();
+    } else if(jumpCount < MAX_JUMPS && timeSinceLastTap < DOUBLE_TAP_WINDOW) {
+      p.vy = JUMP_V * 0.85;
+      jumpCount++;
+      lastTapTime = now;
+      for(var i=0; i<6; i++) {
+        dust.push({x: p.x + Math.random()*20, y: p.y + FEET_ROW*layout().sc, vx: (Math.random()-0.5)*3, vy: Math.random()*2, life: 15, max: 15, sz: 2 + Math.random()*2});
+      }
+    }
+  }
+
+  function spawnJumpDust() {
+    var l = layout();
+    for(var i=0; i<4; i++) {
+      dust.push({x: l.px+Math.random()*10, y: l.gY-2, vx: -1-Math.random()*2, vy: -0.3-Math.random(), life: 10+Math.random()*8, max: 18, sz: 1.5+Math.random()*2});
+    }
+  }
+
+  function startGame() {
+    state = 'playing';
+    score = 0; energy = 100; gameTime = 0; noMissTime = 0; 
+    boostTimer = 0; slowMotionTimer = 0;
+    capsules = []; jars = []; obstacles = []; dust = [];
+    capTimer = 0; obsTimer = 0; jarTimer = 0;
+    baseGameSpeed = 6; currentSpeed = 6;
+    p.fallen = false; p.frame = 0; p.timer = 0; p.jump = false; p.grounded = true;
+    p.vy = 0;
+    jumpCount = 0;
+    lastTapTime = 0;
+    var l = layout();
+    p.y = l.gY - FEET_ROW*l.sc;
+    initBuildings();
+    
+    stats = { capsulesCollected: 0, capsulesMissed: 0, boostsCollected: 0, boostsMissed: 0 };
+    
+    startScreen.style.display = 'none';
+    gameOverScreen.style.display = 'none';
+    pauseScreen.style.display = 'none';
+    pauseBtn.style.display = 'block';
+  }
+
+  function pauseGame() {
+    if(state === 'playing') {
+      state = 'paused';
+      pauseScreen.style.display = 'flex';
+      pauseBtn.style.display = 'none';
+    }
+  }
+
+  function resumeGame() {
+    if(state === 'paused') {
+      state = 'playing';
+      pauseScreen.style.display = 'none';
+      pauseBtn.style.display = 'block';
+    }
+  }
+
+  function triggerGameOver() {
+    state = 'over';
+    if (score > hiScore) {
+      try { localStorage.setItem('officeRunnerHi', score); } catch(e){}
+      hiScore = score;
+    }
+    finalScoreEl.textContent = score;
+    
+    var capsTotal = stats.capsulesCollected + stats.capsulesMissed;
+    var boostsTotal = stats.boostsCollected + stats.boostsMissed;
+    
+    // Выровненный текст статистики
+    endStatsEl.textContent = 
+        'hi-score:   ' + hiScore + '\n' +
+        'БАДов:     ' + stats.capsulesCollected + '/' + capsTotal + '\n' +
+        "Boost's:   " + stats.boostsCollected + '/' + boostsTotal;
+    
+    gameOverScreen.style.display = 'flex';
+    pauseBtn.style.display = 'none';
+  }
+
+  startBtn.addEventListener('click', startGame);
+  restartBtn.addEventListener('click', startGame);
+  resumeBtn.addEventListener('click', resumeGame);
+  pauseBtn.addEventListener('click', pauseGame);
+
+  function handleInput() {
+    if(state === 'start') { startGame(); return; }
+    if(state === 'playing') doJump();
+  }
+
+  canvas.addEventListener('mousedown', function(e) {
+      if(e.target.closest('.btn') || e.target.closest('#pauseBtn')) return;
+      handleInput();
+  });
+  canvas.addEventListener('touchstart', function(e) { 
+      if(e.target.closest('.btn') || e.target.closest('#pauseBtn')) return;
+      e.preventDefault(); handleInput(); 
+  }, {passive: false});
+  
+  document.addEventListener('keydown', function(e) {
+    if(e.code === 'Escape' || e.code === 'KeyP') {
+        if(state === 'playing') pauseGame();
+        else if(state === 'paused') resumeGame();
+    }
+    if(e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault();
+      handleInput();
+    }
+  });
+
+  function update() {
+    if(state !== 'playing') return;
+    gameTime++;
+    var l = layout();
+
+    if(gameTime % 300 === 0) baseGameSpeed += 0.2;
+    currentSpeed = baseGameSpeed;
+
+    energy -= 0.03 + (gameTime * 0.00001);
+    if(energy <= 0) { energy = 0; triggerGameOver(); return; }
+
+    var timeScale = 1.0;
+    if(slowMotionTimer > 0) {
+      slowMotionTimer--;
+      timeScale = 0.4;
+    }
+    
+    if(boostTimer > 0) boostTimer -= timeScale;
+
+    var scaledSpeed = currentSpeed * timeScale;
+
+    p.vy += GRAV * timeScale;
+    p.y += p.vy * timeScale;
+    if(p.y + FEET_ROW*l.sc >= l.gY) {
+      p.y = l.gY - FEET_ROW*l.sc;
+      p.vy = 0;
+      p.jump = false;
+      p.grounded = true;
+      jumpCount = 0;
+      if(timeScale < 1) spawnJumpDust();
+    }
+
+    p.timer += scaledSpeed * 0.09;
+    if(p.timer > 1) { p.timer = 0; p.frame++; }
+
+    bgs.far.forEach(function(b) { b.x -= scaledSpeed * 0.2; });
+    bgs.mid.forEach(function(b) { b.x -= scaledSpeed * 0.6; });
+    bgs.near.forEach(function(b) { b.x -= scaledSpeed * 1.0; });
+
+    if(bgs.far.length && bgs.far[0].x + bgs.far[0].w < -50) {
+      bgs.far.shift();
+      bgs.far.push(createBuilding(bgs.far[bgs.far.length-1].x + 100, 0.3, 80, 120));
+    }
+    if(bgs.mid.length && bgs.mid[0].x + bgs.mid[0].w < -100) {
+      bgs.mid.shift();
+      bgs.mid.push(createBillboard(bgs.mid[bgs.mid.length-1].x + 280));
+    }
+    if(bgs.near.length && bgs.near[0].x + bgs.near[0].w < -50) {
+      bgs.near.shift();
+      bgs.near.push(createBuilding(bgs.near[bgs.near.length-1].x + 150, 1.0, 60, 100));
+    }
+
+    groundOff = (groundOff + scaledSpeed) % 20;
+
+    if(timeScale >= 1) {
+      capTimer++; if(capTimer >= 160) { capTimer = 0; spawnCapsule(); }
+      obsTimer++; if(obsTimer >= 180) { obsTimer = 0; spawnObstacle(); }
+      jarTimer++; if(jarTimer >= 900) { jarTimer = 0; spawnJar(); }
+    }
+
+    for(var i=capsules.length-1; i>=0; i--) {
+      var c = capsules[i]; c.x -= scaledSpeed;
+      if(!c.collected) {
+        var ps=l.sc, pl=l.px+3*ps, pt=p.y-2*ps, pr=l.px+13*ps, pb=p.y+FEET_ROW*ps+2*ps;
+        var by = c.y + Math.sin(gameTime*0.07+c.bob)*3;
+        if(pl < c.x+c.w && pr > c.x && pt < by+c.h && pb > by) {
+          c.collected = true; 
+          stats.capsulesCollected++;
+          energy = Math.min(100, energy+12); score += 100;
+          noMissTime = 0;
+        }
+      }
+      if(c.x+c.w < -30) {
+        if(!c.collected) { 
+          stats.capsulesMissed++;
+          energy -= 15; shakeT = 10; shakeI = 4; noMissTime = 0; 
+        }
+        capsules.splice(i, 1);
+      }
+    }
+
+    for(var i=obstacles.length-1; i>=0; i--) {
+      var o = obstacles[i]; o.x -= scaledSpeed;
+      var ps=l.sc, pl=l.px+3*ps, pt=p.y-2*ps, pr=l.px+13*ps, pb=p.y+FEET_ROW*ps+2*ps;
+      if(pl < o.x+o.w && pr > o.x && pt < o.y+o.h && pb > o.y) {
+        energy -= 30; shakeT = 15; shakeI = 6;
+        obstacles.splice(i, 1);
+      }
+      if(o.x+o.w < -30) obstacles.splice(i, 1);
+    }
+
+    for(var i=jars.length-1; i>=0; i--) {
+      var j = jars[i]; j.x -= scaledSpeed;
+      if(!j.collected) {
+        var ps=l.sc, pl=l.px+3*ps, pt=p.y-2*ps, pr=l.px+13*ps, pb=p.y+FEET_ROW*ps+2*ps;
+        var by = j.y + Math.sin(gameTime*0.07+j.bob)*3;
+        if(pl < j.x+j.w && pr > j.x && pt < by+j.h && pb > by) {
+          j.collected = true; 
+          stats.boostsCollected++;
+          energy = 100; 
+          slowMotionTimer = 90;
+          boostTimer = 90;
+        }
+      }
+      if(j.x+j.w < -30) {
+        if(!j.collected) { 
+          stats.boostsMissed++;
+        }
+        jars.splice(i, 1);
+      }
+    }
+
+    for(var i=dust.length-1; i>=0; i--) { 
+      dust[i].x -= scaledSpeed; 
+      dust[i].life -= timeScale; 
+      if(dust[i].life<=0) dust.splice(i,1); 
+    }
+
+    if(shakeT > 0) shakeT--;
+    noMissTime++;
+    if(gameTime % 4 === 0) score++;
+  }
+
+  function drawGame() {
+    var l = layout(), ps = l.sc;
+    ctx.save();
+    
+    if(slowMotionTimer > 0) {
+      ctx.save();
+      ctx.translate((Math.random()-0.5)*2, (Math.random()-0.5)*2);
+      ctx.strokeStyle = 'rgba(100, 200, 255, ' + (slowMotionTimer/90) * 0.5 + ')';
+      ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, W-8, H-8);
+      ctx.restore();
+    }
+    
+    if(shakeT > 0) ctx.translate((Math.random()-0.5)*shakeI, (Math.random()-0.5)*shakeI);
+
+    var skyGrad = ctx.createLinearGradient(0, 0, 0, l.gY);
+    skyGrad.addColorStop(0, '#4a4a4a');
+    skyGrad.addColorStop(1, '#8a8a8a');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, l.gY);
+
+    bgs.far.forEach(function(b) {
+      ctx.fillStyle = b.color;
+      ctx.fillRect(b.x, l.gY - b.h, b.w, b.h);
+    });
+
+    bgs.mid.forEach(function(b) {
+      drawBillboard(b, l);
+    });
+
+    bgs.near.forEach(function(b) {
+      ctx.fillStyle = b.color;
+      ctx.fillRect(b.x, l.gY - b.h, b.w, b.h);
+    });
+
+    ctx.fillStyle = '#555';
+    ctx.fillRect(0, l.gY, W, H - l.gY);
+    
+    ctx.fillStyle = '#fff';
+    for(var i=-1; i<W/40+2; i++) {
+      var dx = i*40 - groundOff;
+      ctx.fillRect(dx, l.gY + 10, 20, 4);
+    }
+
+    dust.forEach(function(d) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (d.life/d.max)*0.3 + ')';
+      ctx.fillRect(d.x, d.y, d.sz, d.sz);
+    });
+
+    obstacles.forEach(function(o) { drawObstacle(o); });
+    jars.forEach(function(j) { if(!j.collected) drawJar(j.x, j.y+Math.sin(gameTime*0.07+j.bob)*3, j.w, j.h); });
+    capsules.forEach(function(c) { if(!c.collected) drawCapsule(c.x, c.y+Math.sin(gameTime*0.07+c.bob)*3, c.w, c.h, c.type); });
+
+    if(!p.grounded && jumpCount < MAX_JUMPS) {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.font = 'bold 10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('⬆', l.px + 8*ps, p.y - 5);
+      ctx.textAlign = 'left';
+    }
+
+    drawPixel(l.px, p.y, getSprite(p.frame, p.jump), ps);
+    
+    if(slowMotionTimer > 0) {
+      ctx.fillStyle = 'rgba(100, 200, 255, 0.1)';
+      ctx.fillRect(0, 0, W, H);
+    }
+    
+    ctx.restore();
+
+    var energyPct = Math.max(0, Math.min(1, energy / 100));
+    var barW = Math.min(200, W * 0.3);
+    var barH = 24;
+    var barX = 70;
+    var barY = 12;
+
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(barX, barY, barW, barH);
+    
+    var grad = ctx.createLinearGradient(barX, barY, barX + barW, barY);
+    grad.addColorStop(0, '#ff0000');
+    grad.addColorStop(0.5, '#ffff00');
+    grad.addColorStop(1, '#00ff00');
+    
+    ctx.fillStyle = grad;
+    ctx.fillRect(barX + 2, barY + 2, (barW - 4) * energyPct, barH - 4);
+    
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(Math.ceil(energy) + '%', barX + barW/2, barY + 17);
+
+    ctx.fillStyle = '#fff'; 
+    ctx.font = 'bold ' + Math.max(20, H*0.04) + 'px monospace';
+    ctx.textAlign = 'right'; 
+    ctx.fillText(String(score).padStart(5, '0'), W-10, 28);
+    ctx.textAlign = 'left';
+
+    ctx.fillStyle = '#fff';
+    for(var i=0; i<MAX_JUMPS; i++) {
+      ctx.beginPath();
+      ctx.arc(W - 25 + i*20, 22, 5, 0, Math.PI*2);
+      ctx.fillStyle = i < jumpCount ? '#666' : '#fff';
+      ctx.fill();
+    }
+
+    if(boostTimer > 0) {
+        ctx.save();
+        var alpha = boostTimer / 90;
+        ctx.globalAlpha = alpha > 1 ? 1 : alpha;
+        
+        var pulse = 1 + Math.sin(boostTimer * 0.3) * 0.1;
+        ctx.scale(pulse, pulse);
+        
+        ctx.fillStyle = '#4fc3f7';
+        ctx.font = 'bold ' + Math.max(28, H*0.06) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 4;
+        ctx.strokeText('ENERGY BOOST!', (W/2)/pulse, (H*0.25)/pulse);
+        ctx.fillText('ENERGY BOOST!', (W/2)/pulse, (H*0.25)/pulse);
+        ctx.restore();
+        
+        ctx.fillStyle = 'rgba(100, 200, 255, 0.8)';
+        ctx.font = 'bold ' + Math.max(12, H*0.02) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('⏳ SLOW MOTION', W/2, H*0.32);
+        ctx.textAlign = 'left';
+    }
+  }
+
+  function loop() {
+    update();
+    if(state === 'start') drawStart();
+    else if(state === 'playing') drawGame();
+    else if(state === 'paused') drawGame();
+    else if(state === 'over') drawGame();
+
+    requestAnimationFrame(loop);
+  }
+
+  document.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+
+  initBuildings();
+  loop();
+
+})();
+</script>
+</body>
+</html>
+
